@@ -18,17 +18,17 @@ void registerUser(int sockfd) {
     name[strcspn(name, "\n")] = '\0';
 
     // Send name to server for registration
-    ssize_t bytesWritten = write(sockfd, name, strlen(name));
+    ssize_t bytesWritten = send(sockfd, name, strlen(name), 0);
     if (bytesWritten <= 0) {
-        perror("write");
+        perror("send");
         exit(1);
     }
 
     // Receive response from server
     char response[256];
-    ssize_t bytesRead = read(sockfd, response, sizeof(response));
+    ssize_t bytesRead = recv(sockfd, response, sizeof(response), 0);
     if (bytesRead <= 0) {
-        perror("read");
+        perror("recv");
         exit(1);
     }
     printf("%s\n", response);
@@ -46,9 +46,9 @@ void sendMessage(int sockfd) {
         message[strcspn(message, "\n")] = '\0';
 
         // Send message to server
-        ssize_t bytesWritten = write(sockfd, message, strlen(message));
+        ssize_t bytesWritten = send(sockfd, message, strlen(message), 0);
         if (bytesWritten <= 0) {
-            perror("write");
+            perror("send");
             exit(1);
         }
 
@@ -59,9 +59,9 @@ void sendMessage(int sockfd) {
 
         // Receive response from server
         char response[MAX_MESSAGE_LENGTH];
-        ssize_t bytesRead = read(sockfd, response, sizeof(response));
+        ssize_t bytesRead = recv(sockfd, response, sizeof(response), 0);
         if (bytesRead <= 0) {
-            perror("read");
+            perror("recv");
             exit(1);
         }
         printf("Server response: %s\n", response);
