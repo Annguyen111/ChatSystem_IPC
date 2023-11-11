@@ -1,250 +1,152 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <unistd.h>
 #include <pthread.h>
-#include <sys/ipc.h>
-#include <sys/sem.h>
-#include <sys/types.h>
-#include <errno.h>
+#include <semaphore.h>
 
 #define MAX_NAME_LENGTH 20
-#define SERVER_PORT 8080
+#define MAX_MESSAGE_LENGTH 256
 #define MAX_CLIENTS 10
+#define SERVER_PORT 8080
 
-int semid;
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-
-void registerUser(int clientSock)
-{
-    // Read user name from client
+typedef struct {
+    int sockfd;
     char name[MAX_NAME_LENGTH];
-    ssize_t bytesRead = read(clientSock, name, sizeof(name));
-    if (bytesRead <= 0)
-    {
-        perror("read");
-        exit(1);
-    }
+} ClientInfo;
 
-    char response[] = "User registered successfully. Welcome!\n";
-    ssize_t bytesWritten = write(clientSock, response, strlen(response));
-    if (bytesWritten <= 0)
-    {
-        perror("write");
-        exit(1);
-    }
-}
+ClientInfo clients[MAX_CLIENTS];
+int numClients = 0;
+sem_t mutex;
 
-void sendMessageToAllUsers(int senderSock, char *message)
-{
-    pthread_mutex_lock(&mutex);
-    int clientSockets[MAX_CLIENTS];
-        // Send message to all connected clients except the sender
-        for (int i = 0; i < MAX_CLIENTS; i++)
-    {
-        int clientSock = clientSockets[i];
-        if (clientSock != -1 && clientSock != senderSock)
-        {
-            ssize_t bytesWritten = write(clientSock, message, strlen(message));
-            if (bytesWritten <= 0)
-            {
-                perror("write");
-                exit(1);
+void *handleClient(void *arg) {
+    ClientInfo *client = (ClientInfo *)arg;
+    char message[MAX_MESSAGE_LENGTH];
+
+    while (1) {
+        // Receive message from client
+        ssize_t bytesRead = recv(client->sockfd, message, sizeof(message), 0);
+        if (bytesRead <= 0) {
+            // Client disconnected
+            sem_wait(&mutex);
+            printf("Client '%s' left the chat room\n", client->name);
+            // Remove client from the list
+            for (int i = 0; i < numClients; i++) {
+                if (clients[i].sockfd == client->sockfd) {
+                    for (int j = i; j < numClients - 1; j++) {
+                        clients[j] = clients[j + 1];
+                    }
+                    numClients--;
+                    break;
+                }
             }
-        }
-    }
-
-    pthread_mutex_unlock(&mutex);
-}
-
-void *handleClient(void *arg)
-{
-    int clientSock = *((int *)arg);
-    struct sockaddr_in clientAddr;
-    socklen_t addrLen = sizeof(struct sockaddr_in);
-
-    // Get client address
-    if (getpeername(clientSock, (struct sockaddr *)&clientAddr, &addrLen) == -1)
-    {
-        perror("getpeername");
-        exit(1);
-    }
-
-    printf("Client connected: %s\n", inet_ntoa(clientAddr.sin_addr));
-
-    // Handle client requests
-    char request[256];
-    while (1)
-    {
-        // Read client request
-        ssize_t bytesRead = read(clientSock, request, sizeof(request));
-        if (bytesRead <= 0)
-        {
-            printf("Client disconnected: %s\n", inet_ntoa(clientAddr.sin_addr));
-            close(clientSock);
+            sem_post(&mutex);
             break;
         }
 
-        // Process client request
-        if (strncmp(request, "register", 8) == 0)
-        {
-            // Lock the mutex before registering the user
-            pthread_mutex_lock(&mutex);
-
-            registerUser(clientSock);
-
-            // Unlock the mutex after registering the user
-            pthread_mutex_unlock(&mutex);
-        }
-        else
-        {
-            char response[] = "Invalid request.\n";
-            ssize_t bytesWritten = write(clientSock, response, strlen(response));
-            if (bytesWritten <= 0)
-            {
-                perror("write");
-                exit(1);
+        // Send message to all connected clients
+        sem_wait(&mutex);
+        printf("[%s]: %s\n", client->name, message);
+        for (int i = 0; i < numClients; i++) {
+            if (clients[i].sockfd != client->sockfd) {
+                ssize_t bytesWritten = send(clients[i].sockfd, message, bytesRead, 0);
+                if (bytesWritten <= 0) {
+                    perror("send");
+                    break;
+                }
             }
         }
+        sem_post(&mutex);
     }
 
-    close(clientSock);
+    close(client->sockfd);
+    free(client);
     pthread_exit(NULL);
 }
 
-int main()
-{
-    int serverSock, clientSock;
-    struct sockaddr_in serverAddr, clientAddr;
-    socklen_t addrLen = sizeof(struct sockaddr_in);
-    pthread_t threads[MAX_CLIENTS];
-    int clientSockets[MAX_CLIENTS];
-    int threadCount = 0;
+int main() {
+    int sockfd;
+    struct sockaddr_in serverAddr;
 
-    // Initialize clientSockets array
-    for (int i = 0; i < MAX_CLIENTS; i++)
-    {
-        clientSockets[i] = -1;
-    }
-
-    // Create server socket
-    serverSock = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSock == -1)
-    {
+    // Create socket
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd == -1) {
         perror("socket");
         exit(1);
     }
 
     // Set server details
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(SERVER_PORT);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(SERVER_PORT);
 
     // Bind socket to server address
-    if (bind(serverSock, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1)
-    {
+    if (bind(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1) {
         perror("bind");
         exit(1);
     }
 
-    // Initialize semaphore
-    key_t key;
-    if ((key = ftok(".", 'S')) == -1)
-    {
-        perror("ftok");
-        exit(1);
-    }
-
-    semid = semget(key, 1, IPC_CREAT | IPC_EXCL | 0666);
-    if (semid == -1)
-    {
-        if (errno == EEXIST)
-        {
-            semid = semget(key, 1, 0);
-        }
-        else
-        {
-            perror("semget");
-            exit(1);
-        }
-    }
-    else
-    {
-        union semun
-        {
-            int val;
-            struct semid_ds *buf;
-            unsigned short *array;
-        } arg;
-
-        arg.val = 1;
-        if (semctl(semid, 0, SETVAL, arg) == -1)
-        {
-            perror("semctl");
-            exit(1);
-        }
-    }
-
     // Listen for incoming connections
-    if (listen(serverSock, MAX_CLIENTS) == -1)
-    {
+    if (listen(sockfd, MAX_CLIENTS) == -1) {
         perror("listen");
         exit(1);
     }
 
-    printf("Server started. Listening on port %d\n", SERVER_PORT);
+    sem_init(&mutex, 0, 1);
 
-    // Accept client connections and create threads to handle them
-    while (1)
-    {
-        // Accept new connection
-        clientSock = accept(serverSock, (struct sockaddr *)&clientAddr, &addrLen);
-        if (clientSock == -1)
-        {
+    while (1) {
+        // Accept client connection
+        struct sockaddr_in clientAddr;
+        socklen_t clientAddrLen = sizeof(clientAddr);
+        int clientSockfd = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
+        if (clientSockfd == -1) {
             perror("accept");
-            exit(1);
-        }
-
-        // Check if maximum number of clients reached
-        if (threadCount >= MAX_CLIENTS)
-        {
-            printf("Maximum number of clients reached. Connection rejected.\n");
-            close(clientSock);
             continue;
         }
 
-        // Store client socket in array
-        for (int i = 0; i < MAX_CLIENTS; i++)
-        {
-            if (clientSockets[i] == -1)
-            {
-                clientSockets[i] = clientSock;
-                break;
-            }
+        // Check if maximum number of clients reached
+        if (numClients >= MAX_CLIENTS) {
+            printf("Maximum number of clients reached. Connection rejected.\n");
+            close(clientSockfd);
+            continue;
         }
+
+        // Read client name
+        char name[MAX_NAME_LENGTH];
+        ssize_t bytesRead = recv(clientSockfd, name, sizeof(name) - 1, 0);
+        if (bytesRead <= 0) {
+            perror("recv");
+            close(clientSockfd);
+            continue;
+        }
+        name[bytesRead] = '\0';
+
+        // Create client info
+        ClientInfo *client = (ClientInfo *)malloc(sizeof(ClientInfo));
+        client->sockfd = clientSockfd;
+        strncpy(client->name, name, sizeof(client->name) - 1);
+
+        // Add client to list
+        sem_wait(&mutex);
+        clients[numClients++] = *client;
+        sem_post(&mutex);
 
         // Create thread to handle client
-        if (pthread_create(&threads[threadCount], NULL, handleClient, &clientSock) != 0)
-        {
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, handleClient, client) != 0) {
             perror("pthread_create");
-            exit(1);
+            close(clientSockfd);
+            free(client);
+            continue;
         }
 
-        // Increase thread count
-        threadCount++;
+        printf("Client '%s' joined the chat room\n", name);
     }
 
-    // Wait for all threads to finish
-    for (int i = 0; i < threadCount; i++)
-    {
-        pthread_join(threads[i], NULL);
-    }
-
-    // Close server socket
-    close(serverSock);
+    close(sockfd);
+    sem_destroy(&mutex);
 
     return 0;
 }
