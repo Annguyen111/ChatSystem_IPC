@@ -1,119 +1,81 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <pthread.h>
+#include <stdlib.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/select.h>
 
-#define MAX_NAME_LENGTH 20
-#define MAX_MESSAGE_LENGTH 256
-#define SERVER_IP "127.0.0.1"
-#define SERVER_PORT 8080
-
-typedef struct {
-    int sockfd;
-    const char *name;
-} ThreadData;
-
-void *receiveMessages(void *arg) {
-    ThreadData *data = (ThreadData *)arg;
-    int sockfd = data->sockfd;
-    const char *name = data->name;
-    char message[MAX_MESSAGE_LENGTH];
-
-    while (1) {
-        // Receive message from server
-        ssize_t bytesRead = recv(sockfd, message, sizeof(message), 0);
-        if (bytesRead <= 0) {
-            perror("recv");
-            break;
-        }
-        message[bytesRead] = '\0';
-        printf("[%s]: %s\n", name, message);
-    }
-
-    pthread_exit(NULL);
+// hàm này đọc dữ liệu từ stdin cho đến khi gặp ký tự eoc hoặc đạt đến giới hạn maxchars.
+int readline(char *buffer, int maxchars, char eoc) {
+  int n = 0;
+  while(n < maxchars) {
+    buffer[n] = getc(stdin);
+    if(buffer[n] == eoc)
+      break;
+    n++;
+  }
+  return n;
 }
 
-void sendMessage(int sockfd, const char *name) {
-    char message[MAX_MESSAGE_LENGTH];
+int main(int argc, char const *argv[]) {
+  int sockfd;
+  struct sockaddr_in serv_addr;
+  char sendline[1024], recvline[1024];
 
-    while (1) {
-        // Read message from client
-        printf("[%s]: ", name);
-        fgets(message, MAX_MESSAGE_LENGTH, stdin);
-        message[strcspn(message, "\n")] = '\0';
+  // tạo socket
+  if((sockfd = socket(AF_INET, SOCK_STREAM, 0)) <= 0) {
+    perror("error while creating socket...");
+    exit(1);
+  }
 
-        // Check if client wants to quit
-        if (strcmp(message, "q") == 0) {
-            break;
-        }
+  // thiết lập địa chỉ của server
+  serv_addr.sin_family = AF_INET;
+  serv_addr.sin_port = htons(8080);
+  if(inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) { 
+    perror("address conversion error...");
+    exit(-1);
+  } 
 
-        // Send message to server
-        ssize_t bytesWritten = send(sockfd, message, strlen(message), 0);
-        if (bytesWritten <= 0) {
-            perror("send");
-            break;
-        }
+  // kết nối đến server
+  if(connect(sockfd, (struct sockaddr *) &serv_addr, sizeof serv_addr) < 0) {
+    perror("connect error...");
+    exit(1);
+  }
+  
+  fd_set waitfds;
+  int readyfds;
+  while(1) {
+    FD_ZERO(&waitfds);
+
+    // thêm socket và stdin vào set waitfds
+    FD_SET(sockfd, &waitfds);
+    FD_SET(0, &waitfds);
+
+    // khởi tạo lại các buffer
+    memset(recvline, 0, 1024);
+    memset(sendline, 0, 1024);
+
+    // kiểm tra sự sẵn có của socket và stdin bằng hàm select
+    readyfds = select(sockfd + 1, &waitfds, NULL, NULL, NULL);
+    if ((readyfds < 0) && (errno != EINTR)) {
+      perror("select error");
+      exit(1);
     }
 
-    // Close socket
-    close(sockfd);
-}
-
-int main() {
-    int sockfd;
-    struct sockaddr_in serverAddr;
-
-    // Create socket
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1) {
-        perror("socket");
-        exit(1);
+    // nếu stdin sẵn có, đọc dữ liệu và gửi đi
+    if(FD_ISSET(0, &waitfds)) {
+      readline(sendline, 1024, '\n');
+      write(sockfd, sendline, strlen(sendline));
     }
-
-    // Set server details
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(SERVER_PORT);
-    if (inet_pton(AF_INET, SERVER_IP, &(serverAddr.sin_addr)) <= 0) {
-        perror("inet_pton");
-        exit(1);
+    
+    // nếu socket sẵn có, đọc dữ liệu và in ra màn hình
+    if(FD_ISSET(sockfd, &waitfds)) {
+      read(sockfd, recvline, 1024);
+      fprintf(stdout, "%s", recvline);
     }
+  }
 
-    // Connect to server
-    if (connect(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1) {
-        perror("connect");
-        exit(1);
-    }
-
-    // Register user
-    char name[MAX_NAME_LENGTH];
-    printf("Enter your name: ");
-    fgets(name, MAX_NAME_LENGTH, stdin);
-    name[strcspn(name, "\n")] = '\0';
-
-    // Send name to server for registration
-    ssize_t bytesWritten = send(sockfd, name, strlen(name), 0);
-    if (bytesWritten <= 0) {
-        perror("send");
-        exit(1);
-    }
-
-    // Create thread data
-    ThreadData data;
-    data.sockfd = sockfd;
-    data.name = name;
-
-    // Create thread to receive messages from server
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, receiveMessages, &data) != 0) {
-        perror("pthread_create");
-        exit(1);
-    }
-
-    // Send and receive messages
-    sendMessage(sockfd, name);
-
-    return 0;
+  return 0;
 }
