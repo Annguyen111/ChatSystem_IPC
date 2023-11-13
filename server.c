@@ -1,152 +1,177 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <pthread.h>
+#include <stdlib.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <string.h>
+#include <sys/time.h>
+#include <errno.h>
 #include <semaphore.h>
 
-#define MAX_NAME_LENGTH 20
-#define MAX_MESSAGE_LENGTH 256
 #define MAX_CLIENTS 10
-#define SERVER_PORT 8080
 
-typedef struct {
+sem_t sem; // semaphore
+
+struct Client
+{
     int sockfd;
-    char name[MAX_NAME_LENGTH];
-} ClientInfo;
+    char name[50];
+};
 
-ClientInfo clients[MAX_CLIENTS];
-int numClients = 0;
-sem_t mutex;
+int main(int argc, char const *argv[])
+{
+    int mastersockfd, activeconnections = 0;
+    struct Client clients[MAX_CLIENTS];
 
-void *handleClient(void *arg) {
-    ClientInfo *client = (ClientInfo *)arg;
-    char message[MAX_MESSAGE_LENGTH];
+    struct sockaddr_in serv_addr, clientIPs[MAX_CLIENTS];
+    int addrlen = sizeof serv_addr;
+    char inBuffer[1024] = {0};
+    char outBuffer[1024] = {0};
 
-    while (1) {
-        // Receive message from client
-        ssize_t bytesRead = recv(client->sockfd, message, sizeof(message), 0);
-        if (bytesRead <= 0) {
-            // Client disconnected
-            sem_wait(&mutex);
-            printf("Client '%s' left the chat room\n", client->name);
-            // Remove client from the list
-            for (int i = 0; i < numClients; i++) {
-                if (clients[i].sockfd == client->sockfd) {
-                    for (int j = i; j < numClients - 1; j++) {
-                        clients[j] = clients[j + 1];
+    // khởi tạo semaphore với giá trị ban đầu là 1 (unlocked)
+    if (sem_init(&sem, 0, 1) == -1)
+    {
+        perror("Semaphore initialization failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // tạo master socket
+    if ((mastersockfd = socket(AF_INET, SOCK_STREAM, 0)) <= 0)
+    {
+        perror("error while creating socket...");
+        exit(1);
+    }
+
+    // thiết lập thông tin địa chỉ của server
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(8080);
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+
+    // thiết lập tùy chọn cho socket để tái sử dụng địa chỉ ngay sau khi đóng socket
+    int opt = 1;
+    setsockopt(mastersockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&opt, sizeof(opt));
+
+    // liên kết master socket với địa chỉ và cổng
+    if (bind(mastersockfd, (struct sockaddr *)&serv_addr, addrlen) < 0)
+    {
+        perror("bind failed...");
+        exit(1);
+    }
+
+    // lắng nghe kết nối đến master socket
+    if (listen(mastersockfd, 3) < 0)
+    {
+        perror("Listen failed ...");
+        exit(1);
+    }
+
+    fprintf(stdout, "Server is listening on port %d\n", ntohs(serv_addr.sin_port));
+
+    fd_set readfds;
+    int max_fd, readyfds;
+
+    // vòng lặp chính để xử lý kết nối
+    while (1)
+    {
+        // thiết lập set readfds và max_fd
+        FD_ZERO(&readfds);
+        FD_SET(mastersockfd, &readfds);
+        max_fd = mastersockfd;
+
+        for (int i = 0; i < activeconnections; i++)
+        {
+            if (clients[i].sockfd != 0)
+            {
+                FD_SET(clients[i].sockfd, &readfds);
+                if (clients[i].sockfd > max_fd)
+                    max_fd = clients[i].sockfd;
+            }
+        }
+
+        // sử dụng hàm select để kiểm tra sự sẵn có của dữ liệu đọc từ các socket
+        readyfds = select(max_fd + 1, &readfds, NULL, NULL, NULL);
+
+        if ((readyfds < 0) && (errno != EINTR))
+        {
+            perror("select error");
+            exit(1);
+        }
+
+        // kiểm tra xem có kết nối mới đến master socket không
+        if (FD_ISSET(mastersockfd, &readfds))
+        {
+            // dợi semaphore trước khi thực hiện thao tác trên dữ liệu
+            sem_wait(&sem);
+
+            // chấp nhận kết nối mới
+            if ((clients[activeconnections].sockfd = accept(mastersockfd, (struct sockaddr *)&clientIPs[activeconnections], (socklen_t *)&addrlen)) < 0)
+            {
+                perror("accept error...");
+                exit(1);
+            }
+
+            fprintf(stdout, "New connection from %s\n", inet_ntoa(clientIPs[activeconnections].sin_addr));
+
+            // nhận tên từ client và lưu vào danh sách
+            read(clients[activeconnections].sockfd, clients[activeconnections].name, sizeof(clients[activeconnections].name));
+
+            fprintf(stdout, "Client %s joined\n", clients[activeconnections].name);
+            activeconnections++;
+
+            // giải phóng semaphore sau khi đã thực hiện xong thao tác trên dữ liệu
+            sem_post(&sem);
+        }
+
+        // xử lý dữ liệu từ các client kết nối
+        for (int i = 0; i < activeconnections; i++)
+        {
+            if (clients[i].sockfd != 0 && FD_ISSET(clients[i].sockfd, &readfds))
+            {
+                // dợi semaphore trước khi thực hiện thao tác trên dữ liệu
+                sem_wait(&sem);
+
+                // xóa bộ đệm
+                memset(inBuffer, 0, 1024);
+                memset(outBuffer, 0, 1024);
+
+                // hàm read trả về 0 nếu kết nối đã đóng một cách bình thường
+                // và -1 nếu có lỗi
+                if (read(clients[i].sockfd, inBuffer, 1024) <= 0)
+                {
+                    fprintf(stderr, "Client %s disconnected\n", clients[i].name);
+                    close(clients[i].sockfd);
+                    clients[i].sockfd = 0;
+
+                    // giải phóng semaphore sau khi đã thực hiện xong thao tác trên dữ liệu
+                    sem_post(&sem);
+
+                    continue;
+                }
+
+                fprintf(stdout, "%s: %s", clients[i].name, inBuffer);
+
+                // ghép tên client và dữ liệu nhận được để gửi đến các client khác
+                strcat(outBuffer, clients[i].name);
+                strcat(outBuffer, ": ");
+                strcat(outBuffer, inBuffer);
+
+                // gửi dữ liệu đến các client khác
+                for (int j = 0; j < activeconnections; j++)
+                {
+                    if (clients[j].sockfd != 0 && i != j)
+                    {
+                        write(clients[j].sockfd, outBuffer, strlen(outBuffer));
                     }
-                    numClients--;
-                    break;
                 }
-            }
-            sem_post(&mutex);
-            break;
-        }
 
-        // Send message to all connected clients
-        sem_wait(&mutex);
-        printf("[%s]: %s\n", client->name, message);
-        for (int i = 0; i < numClients; i++) {
-            if (clients[i].sockfd != client->sockfd) {
-                ssize_t bytesWritten = send(clients[i].sockfd, message, bytesRead, 0);
-                if (bytesWritten <= 0) {
-                    perror("send");
-                    break;
-                }
+                // giải phóng semaphore sau khi đã thực hiện xong thao tác trên dữ liệu
+                sem_post(&sem);
             }
         }
-        sem_post(&mutex);
     }
 
-    close(client->sockfd);
-    free(client);
-    pthread_exit(NULL);
-}
-
-int main() {
-    int sockfd;
-    struct sockaddr_in serverAddr;
-
-    // Create socket
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd == -1) {
-        perror("socket");
-        exit(1);
-    }
-
-    // Set server details
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(SERVER_PORT);
-
-    // Bind socket to server address
-    if (bind(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == -1) {
-        perror("bind");
-        exit(1);
-    }
-
-    // Listen for incoming connections
-    if (listen(sockfd, MAX_CLIENTS) == -1) {
-        perror("listen");
-        exit(1);
-    }
-
-    sem_init(&mutex, 0, 1);
-
-    while (1) {
-        // Accept client connection
-        struct sockaddr_in clientAddr;
-        socklen_t clientAddrLen = sizeof(clientAddr);
-        int clientSockfd = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
-        if (clientSockfd == -1) {
-            perror("accept");
-            continue;
-        }
-
-        // Check if maximum number of clients reached
-        if (numClients >= MAX_CLIENTS) {
-            printf("Maximum number of clients reached. Connection rejected.\n");
-            close(clientSockfd);
-            continue;
-        }
-
-        // Read client name
-        char name[MAX_NAME_LENGTH];
-        ssize_t bytesRead = recv(clientSockfd, name, sizeof(name) - 1, 0);
-        if (bytesRead <= 0) {
-            perror("recv");
-            close(clientSockfd);
-            continue;
-        }
-        name[bytesRead] = '\0';
-
-        // Create client info
-        ClientInfo *client = (ClientInfo *)malloc(sizeof(ClientInfo));
-        client->sockfd = clientSockfd;
-        strncpy(client->name, name, sizeof(client->name) - 1);
-
-        // Add client to list
-        sem_wait(&mutex);
-        clients[numClients++] = *client;
-        sem_post(&mutex);
-
-        // Create thread to handle client
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, handleClient, client) != 0) {
-            perror("pthread_create");
-            close(clientSockfd);
-            free(client);
-            continue;
-        }
-
-        printf("Client '%s' joined the chat room\n", name);
-    }
-
-    close(sockfd);
-    sem_destroy(&mutex);
+    // hủy semaphore khi không cần sử dụng nữa
+    sem_destroy(&sem);
 
     return 0;
 }
