@@ -7,6 +7,7 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <semaphore.h>
+#include <time.h>
 
 #define MAX_CLIENTS 10
 
@@ -17,6 +18,16 @@ struct Client
     int sockfd;
     char name[50];
 };
+
+void getCurrentTime(char *timeStr) {
+    time_t rawtime;
+    struct tm *timeinfo;
+
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+
+    strftime(timeStr, 20, "%Y-%m-%d %H:%M:%S", timeinfo);
+}
 
 int main(int argc, char const *argv[])
 {
@@ -97,6 +108,7 @@ int main(int argc, char const *argv[])
             exit(1);
         }
 
+
         // kiểm tra xem có kết nối mới đến master socket không
         if (FD_ISSET(mastersockfd, &readfds))
         {
@@ -148,6 +160,17 @@ int main(int argc, char const *argv[])
                     continue;
                 }
 
+                 // Lấy thời gian hiện tại
+        char timeStr[20];
+        getCurrentTime(timeStr);
+
+        // In và log nội dung chat với thời gian
+        FILE *logFile = fopen("chatlog.txt", "a");
+        if (logFile != NULL) {
+            fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
+            fclose(logFile);
+        }
+        
                 fprintf(stdout, "%s: %s", clients[i].name, inBuffer);
 
                 // ghép tên client và dữ liệu nhận được để gửi đến các client khác
