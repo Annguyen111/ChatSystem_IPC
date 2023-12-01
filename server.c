@@ -19,15 +19,11 @@ struct Client
     char name[50];
 };
 
-void getCurrentTime(char *timeStr) {
-    time_t rawtime;
-    struct tm *timeinfo;
+void getCurrentTime(char *timeStr);
+int readline(int sockfd, char *buffer, int maxchars, char eoc);
 
-    time(&rawtime);
-    timeinfo = localtime(&rawtime);
+void handleFileTransfer(int sockfd, const char *senderName);
 
-    strftime(timeStr, 20, "%Y-%m-%d %H:%M:%S", timeinfo);
-}
 
 int main(int argc, char const *argv[])
 {
@@ -161,29 +157,34 @@ int main(int argc, char const *argv[])
                 }
 
                  // Lấy thời gian hiện tại
-        char timeStr[20];
-        getCurrentTime(timeStr);
+       	if (strncmp(inBuffer, "/sendfile", 10) == 0) {
+                    handleFileTransfer(clients[i].sockfd, clients[i].name);
+                } else {
+                    // Lấy thời gian hiện tại
+                    char timeStr[20];
+                    getCurrentTime(timeStr);
 
-        // In và log nội dung chat với thời gian
-        FILE *logFile = fopen("chatlog.txt", "a");
-        if (logFile != NULL) {
-            fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
-            fclose(logFile);
-        }
-        
-                fprintf(stdout, "%s: %s", clients[i].name, inBuffer);
+                    // In và log nội dung chat với thời gian
+                    FILE *logFile = fopen("chatlog.txt", "a");
+                    if (logFile != NULL) {
+                        fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
+                        fclose(logFile);
+                    }
 
-                // ghép tên client và dữ liệu nhận được để gửi đến các client khác
-                strcat(outBuffer, clients[i].name);
-                strcat(outBuffer, ": ");
-                strcat(outBuffer, inBuffer);
+                    fprintf(stdout, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
 
-                // gửi dữ liệu đến các client khác
-                for (int j = 0; j < activeconnections; j++)
-                {
-                    if (clients[j].sockfd != 0 && i != j)
+                    // ghép tên client và dữ liệu nhận được để gửi đến các client khác
+                    strcat(outBuffer, clients[i].name);
+                    strcat(outBuffer, ": ");
+                    strcat(outBuffer, inBuffer);
+
+                    // gửi dữ liệu đến các client khác
+                    for (int j = 0; j < activeconnections; j++)
                     {
-                        write(clients[j].sockfd, outBuffer, strlen(outBuffer));
+                        if (clients[j].sockfd != 0 && i != j)
+                        {
+                            write(clients[j].sockfd, outBuffer, strlen(outBuffer));
+                        }
                     }
                 }
 
@@ -198,3 +199,85 @@ int main(int argc, char const *argv[])
 
     return 0;
 }
+
+void getCurrentTime(char *timeStr)
+{
+    time_t rawtime;
+    struct tm *timeinfo;
+
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+
+    strftime(timeStr, 20, "%Y-%m-%d %H:%M:%S", timeinfo);
+}
+
+int readline(int sockfd, char *buffer, int maxchars, char eoc)
+{
+    int n = 0;
+    while (n < maxchars)
+    {
+        if (read(sockfd, &buffer[n], 1) <= 0)
+        {
+            perror("read error");
+            exit(1);
+        }
+        if (buffer[n] == eoc)
+            break;
+        n++;
+    }
+    return n;
+}
+
+void handleFileTransfer(int sockfd, const char *senderName) {
+    char fileName[256];
+    int fileNameLength = readline(sockfd, fileName, sizeof(fileName) - 1, '\n'); // Read the file name from the client
+    fileName[fileNameLength] = '\0'; // Null-terminate the file name
+
+    char filePath[256];
+
+    // Check if fileName contains a path
+    if (strchr(fileName, '/') != NULL) {
+        // fileName already contains a path, use it directly
+        snprintf(filePath, sizeof(filePath), "%s", fileName);
+    } else {
+        // fileName is just a file name, prepend the desired path
+        int result = snprintf(filePath, sizeof(filePath), "/home/xuanquoc1/ltht/ChatSystem_IPC/%s", fileName);
+
+        if (result < 0 || result >= sizeof(filePath)) {
+            fprintf(stderr, "Error constructing file path\n");
+            return;
+        }
+    }
+
+    FILE *file = fopen(filePath, "wb");
+    if (file == NULL) {
+        perror("Error opening file for writing");
+        fprintf(stderr, "File path: %s\n", filePath);
+        return;
+    }
+
+    // Read file content from the client and write to the file
+    int bytesRead;
+    char buffer[1024];
+    int totalBytesRead = 0;
+    while ((bytesRead = read(sockfd, buffer, sizeof(buffer))) > 0) {
+        fwrite(buffer, 1, bytesRead, file);
+        totalBytesRead += bytesRead;
+    }
+
+    if (bytesRead < 0) {
+        perror("Error reading file content");
+    }
+
+    fclose(file);
+
+    if (totalBytesRead == 0) {
+        fprintf(stderr, "Received file is empty\n");
+        remove(filePath); // Remove the empty file
+    }
+
+    char timeStr[20];
+    getCurrentTime(timeStr);
+    fprintf(stdout, "[%s] File received from %s: %s\n", timeStr, senderName, fileName);
+}
+

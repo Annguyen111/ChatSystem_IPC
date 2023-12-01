@@ -31,6 +31,47 @@ int readline(char *buffer, int maxchars, char eoc) {
     return n;
 }
 
+// Function to send a file to the server
+void sendFile(int sockfd, const char* filePath) {
+    printf("Sending file...\n");
+
+    // Get the home directory
+   
+	//const char *absolutePath = "test.txt";
+    // Rest of your sendFile function remains unchanged
+    FILE* file = fopen(filePath, "rb");
+    if (file == NULL) {
+        perror("Error opening file for reading");
+        fprintf(stderr, "File path: %s\n", filePath);
+        return;
+    }
+
+    // Send command to server indicating file transfer
+    write(sockfd, "/sendfile", strlen("/sendfile"));
+
+    // Send the file name to the server
+    char* fileName = strrchr(filePath, '/');
+    if (fileName != NULL) {
+        fileName++;  // Move past the '/'
+    } else {
+        fileName = (char*)filePath;  // If no '/', use the entire path as the file name
+    }
+
+    write(sockfd, fileName, strlen(fileName));
+
+    // Send the file content to the server
+    int bytesRead;
+    char buffer[1024];
+    while ((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        write(sockfd, buffer, bytesRead);
+    }
+
+    printf("File sent successfully.\n");
+    fclose(file);
+    
+}
+
+
 int main(int argc, char const *argv[]) {
     int sockfd;
     struct sockaddr_in serv_addr;
@@ -76,11 +117,30 @@ int main(int argc, char const *argv[]) {
             exit(1);
         }
 
-        // nếu stdin sẵn có, đọc dữ liệu và gửi đi
+         // nếu stdin sẵn có, đọc dữ liệu và gửi đi
         if (FD_ISSET(0, &waitfds)) {
-            readline(sendline, 1024, '\n');
-            write(sockfd, sendline, strlen(sendline));
+    readline(sendline, 1024, '\n');
+    if (strncmp(sendline, "/sendfile", 9) == 0) {
+        char filePath[256];
+        char *fileCommand = "/sendfile ";
+        char *filePathStart = strstr(sendline, fileCommand);
+
+        if (filePathStart != NULL) {
+            filePathStart += strlen(fileCommand);
+            strcpy(filePath, filePathStart);
+            strtok(filePath, "\n");  // Loại bỏ ký tự newline nếu có
+            printf("Đường dẫn tệp: %s\n", filePath);
+
+            sendFile(sockfd, filePath);
+        } else {
+            // Xử lý lệnh không hợp lệ hoặc đường dẫn tệp không được chỉ định
+            printf("Lệnh không hợp lệ hoặc đường dẫn tệp không được chỉ định.\n");
         }
+    } else {
+        write(sockfd, sendline, strlen(sendline));
+    }
+}
+
 
         // nếu socket sẵn có, đọc dữ liệu và in ra màn hình
         if (FD_ISSET(sockfd, &waitfds)) {
@@ -97,3 +157,4 @@ int main(int argc, char const *argv[]) {
 
     return 0;
 }
+
