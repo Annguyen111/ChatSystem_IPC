@@ -8,18 +8,57 @@
 #include <errno.h>
 #include <semaphore.h>
 #include <time.h>
+#include <pthread.h>
 
 #define MAX_CLIENTS 10
+#define MAX_NAME_LENGTH 50
+#define MAX_PASSWORD_LENGTH 20
 
 sem_t sem; // semaphore
 
 struct Client
 {
     int sockfd;
-    char name[50];
+    char name[MAX_NAME_LENGTH];
+    char password[MAX_PASSWORD_LENGTH];
+};
+struct Credentials
+{
+    char name[MAX_NAME_LENGTH];
+    char password[MAX_PASSWORD_LENGTH];
 };
 
-void getCurrentTime(char *timeStr) {
+int handleClient(const char *usename, const char *password)
+{
+    // Mở file
+    FILE *file = fopen("account.txt", "r");
+    if (file == NULL)
+    {
+        perror("Error opening file");
+        exit(EXIT_FAILURE);
+    }
+
+    char line[100];
+    int matchFound = 0;
+    // Đọc file theo từng dòng
+    while (fgets(line, 100, file))
+    {
+        struct Credentials credentials;
+        if (sscanf(line, "%49[^,],%49s", credentials.name, credentials.password) == 2)
+        {
+            if (strcmp(credentials.name, usename) == 0 && strcmp(credentials.password, password) == 0)
+            {
+                matchFound = 1;
+                break;
+            }
+        }
+    }
+    fclose(file);
+    return matchFound;
+}
+
+void getCurrentTime(char *timeStr)
+{
     time_t rawtime;
     struct tm *timeinfo;
 
@@ -33,6 +72,8 @@ int main(int argc, char const *argv[])
 {
     int mastersockfd, activeconnections = 0;
     struct Client clients[MAX_CLIENTS];
+
+    char receivedData[1024];
 
     struct sockaddr_in serv_addr, clientIPs[MAX_CLIENTS];
     int addrlen = sizeof serv_addr;
@@ -108,7 +149,6 @@ int main(int argc, char const *argv[])
             exit(1);
         }
 
-
         // kiểm tra xem có kết nối mới đến master socket không
         if (FD_ISSET(mastersockfd, &readfds))
         {
@@ -125,11 +165,39 @@ int main(int argc, char const *argv[])
             fprintf(stdout, "New connection from %s\n", inet_ntoa(clientIPs[activeconnections].sin_addr));
 
             // nhận tên từ client và lưu vào danh sách
-            read(clients[activeconnections].sockfd, clients[activeconnections].name, sizeof(clients[activeconnections].name));
+            read(clients[activeconnections].sockfd, receivedData, sizeof(receivedData));
+            printf("Received: %s", receivedData);
 
-            fprintf(stdout, "Client %s joined\n", clients[activeconnections].name);
+            // Tách username vs password
+            char *tokens[2];
+            char *token = strtok(receivedData, ";");
+            for (int i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++)
+            {
+                tokens[i] = token;
+                token = strtok(NULL, ";");
+                printf("Token %d: %s\n", i, tokens[i]);
+            }
+            clients[activeconnections].name[0] = '\0';
+            strncat(clients[activeconnections].name, tokens[0], sizeof(clients[activeconnections].name) - strlen(clients[activeconnections].name) - 1);
+            printf("name: %s\n", clients[activeconnections].name);
+
+            clients[activeconnections].password[0] = '\0';
+            strncat(clients[activeconnections].password, tokens[1], sizeof(clients[activeconnections].password) - strlen(clients[activeconnections].password) - 1);
+            printf("password: %s\n", clients[activeconnections].password);
+            
+            // Kiểm tra đăng nhập
+            if (handleClient(clients[activeconnections].name, clients[activeconnections].password))
+            {
+                printf("Authentication successful\n");
+                fprintf(stdout, "Client %s joined\n", clients[activeconnections].name);
+                memset(tokens, 0, sizeof(tokens));
+            }
+            else
+            {
+                printf("Authentication failed\n");
+            }
+
             activeconnections++;
-
             // giải phóng semaphore sau khi đã thực hiện xong thao tác trên dữ liệu
             sem_post(&sem);
         }
@@ -160,17 +228,18 @@ int main(int argc, char const *argv[])
                     continue;
                 }
 
-                 // Lấy thời gian hiện tại
-        char timeStr[20];
-        getCurrentTime(timeStr);
+                // Lấy thời gian hiện tại
+                char timeStr[20];
+                getCurrentTime(timeStr);
 
-        // In và log nội dung chat với thời gian
-        FILE *logFile = fopen("chatlog.txt", "a");
-        if (logFile != NULL) {
-            fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
-            fclose(logFile);
-        }
-        
+                // In và log nội dung chat với thời gian
+                FILE *logFile = fopen("chatlog.txt", "a");
+                if (logFile != NULL)
+                {
+                    fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
+                    fclose(logFile);
+                }
+
                 fprintf(stdout, "%s: %s", clients[i].name, inBuffer);
 
                 // ghép tên client và dữ liệu nhận được để gửi đến các client khác
