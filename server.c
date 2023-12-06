@@ -8,54 +8,18 @@
 #include <errno.h>
 #include <semaphore.h>
 #include <time.h>
-#include <pthread.h>
 
 #define MAX_CLIENTS 10
-#define MAX_NAME_LENGTH 50
-#define MAX_PASSWORD_LENGTH 20
 
 sem_t sem; // semaphore
 
 struct Client
 {
     int sockfd;
-    char name[MAX_NAME_LENGTH];
-    char password[MAX_PASSWORD_LENGTH];
+    char name[50];
+    char password[20];
+    int authenticated;
 };
-struct Credentials
-{
-    char name[MAX_NAME_LENGTH];
-    char password[MAX_PASSWORD_LENGTH];
-};
-
-int handleClient(const char *usename, const char *password)
-{
-    // Mở file
-    FILE *file = fopen("account.txt", "r");
-    if (file == NULL)
-    {
-        perror("Error opening file");
-        exit(EXIT_FAILURE);
-    }
-
-    char line[100];
-    int matchFound = 0;
-    // Đọc file theo từng dòng
-    while (fgets(line, 100, file))
-    {
-        struct Credentials credentials;
-        if (sscanf(line, "%49[^,],%49s", credentials.name, credentials.password) == 2)
-        {
-            if (strcmp(credentials.name, usename) == 0 && strcmp(credentials.password, password) == 0)
-            {
-                matchFound = 1;
-                break;
-            }
-        }
-    }
-    fclose(file);
-    return matchFound;
-}
 
 void getCurrentTime(char *timeStr)
 {
@@ -68,15 +32,63 @@ void getCurrentTime(char *timeStr)
     strftime(timeStr, 20, "%Y-%m-%d %H:%M:%S", timeinfo);
 }
 
+void sendAuthenticationStatus(int sockfd, int status)
+{
+    write(sockfd, &status, sizeof(status));
+}
+
+void notifyClientsAboutNewConnection(struct Client clients[], int activeconnections, const char* clientName, int state)
+{
+    char notification[100];
+    if (state == 1) {
+        sprintf(notification, "Client %s joined\n", clientName);
+    } else {
+        sprintf(notification, "Client %s logouted\n", clientName);
+    }
+    
+    for (int i = 0; i < activeconnections; i++)
+    {
+        int clientSockfd = clients[i].sockfd;
+        write(clientSockfd, notification, strlen(notification));
+    }
+}
+
+// Xác thực người dùng
+int authenticateUser(const char *username, const char *password, struct Client *client)
+{
+    FILE *dbFile = fopen("database.txt", "r");
+    if (dbFile == NULL)
+    {
+        perror("Error opening database.txt");
+        exit(EXIT_FAILURE);
+    }
+
+    char name[50];
+    char dbPassword[20];
+
+    while (fscanf(dbFile, "%s %s", name, dbPassword) == 2)
+    {
+        if (strcmp(username, name) == 0 && strcmp(password, dbPassword) == 0)
+        {
+            fclose(dbFile);
+            strcpy(client->name, name);
+            strcpy(client->password, dbPassword);
+            return 1; // Authentication successful
+        }
+    }
+
+    fclose(dbFile);
+    return 0; // Authentication failed
+}
+
 int main(int argc, char const *argv[])
 {
     int mastersockfd, activeconnections = 0;
     struct Client clients[MAX_CLIENTS];
 
-    char receivedData[1024];
+    struct sockaddr_in serv_addr, clientIP;
+    int addrlen = sizeof(clientIP);
 
-    struct sockaddr_in serv_addr, clientIPs[MAX_CLIENTS];
-    int addrlen = sizeof serv_addr;
     char inBuffer[1024] = {0};
     char outBuffer[1024] = {0};
 
@@ -101,10 +113,10 @@ int main(int argc, char const *argv[])
 
     // thiết lập tùy chọn cho socket để tái sử dụng địa chỉ ngay sau khi đóng socket
     int opt = 1;
-    setsockopt(mastersockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&opt, sizeof(opt));
+    setsockopt(mastersockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     // liên kết master socket với địa chỉ và cổng
-    if (bind(mastersockfd, (struct sockaddr *)&serv_addr, addrlen) < 0)
+    if (bind(mastersockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
     {
         perror("bind failed...");
         exit(1);
@@ -132,137 +144,151 @@ int main(int argc, char const *argv[])
 
         for (int i = 0; i < activeconnections; i++)
         {
-            if (clients[i].sockfd != 0)
+            int sockfd = clients[i].sockfd;
+            if (sockfd > 0)
             {
-                FD_SET(clients[i].sockfd, &readfds);
-                if (clients[i].sockfd > max_fd)
-                    max_fd = clients[i].sockfd;
+                FD_SET(sockfd, &readfds);
+                if (sockfd > max_fd)
+                {
+                    max_fd = sockfd;
+                }
             }
         }
 
-        // sử dụng hàm select để kiểm tra sự sẵn có của dữ liệu đọc từ các socket
+        // sử dụng select để chờ sự kiện từ các socket
         readyfds = select(max_fd + 1, &readfds, NULL, NULL, NULL);
 
-        if ((readyfds < 0) && (errno != EINTR))
+        if (readyfds < 0)
         {
-            perror("select error");
+            perror("Select failed...");
             exit(1);
         }
 
-        // kiểm tra xem có kết nối mới đến master socket không
+        // kiểm tra xem master socket có sẵn sàng để chấp nhận kết nối mới không
         if (FD_ISSET(mastersockfd, &readfds))
         {
-            // dợi semaphore trước khi thực hiện thao tác trên dữ liệu
-            sem_wait(&sem);
-
-            // chấp nhận kết nối mới
-            if ((clients[activeconnections].sockfd = accept(mastersockfd, (struct sockaddr *)&clientIPs[activeconnections], (socklen_t *)&addrlen)) < 0)
+            int newsockfd;
+            if ((newsockfd = accept(mastersockfd, (struct sockaddr *)&clientIP, (socklen_t *)&addrlen)) < 0)
             {
-                perror("accept error...");
+                perror("Accept failed...");
                 exit(1);
             }
 
-            fprintf(stdout, "New connection from %s\n", inet_ntoa(clientIPs[activeconnections].sin_addr));
-
-            // nhận tên từ client và lưu vào danh sách
-            read(clients[activeconnections].sockfd, receivedData, sizeof(receivedData));
-            printf("Received: %s", receivedData);
-
-            // Tách username vs password
-            char *tokens[2];
-            char *token = strtok(receivedData, ";");
-            for (int i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++)
+            // thêm kết nối mới vào danh sách kết nối
+            if (activeconnections < MAX_CLIENTS)
             {
-                tokens[i] = token;
-                token = strtok(NULL, ";");
-                printf("Token %d: %s\n", i, tokens[i]);
-            }
-            clients[activeconnections].name[0] = '\0';
-            strncat(clients[activeconnections].name, tokens[0], sizeof(clients[activeconnections].name) - strlen(clients[activeconnections].name) - 1);
-            printf("name: %s\n", clients[activeconnections].name);
-
-            clients[activeconnections].password[0] = '\0';
-            strncat(clients[activeconnections].password, tokens[1], sizeof(clients[activeconnections].password) - strlen(clients[activeconnections].password) - 1);
-            printf("password: %s\n", clients[activeconnections].password);
-            
-            // Kiểm tra đăng nhập
-            if (handleClient(clients[activeconnections].name, clients[activeconnections].password))
-            {
-                printf("Authentication successful\n");
-                fprintf(stdout, "Client %s joined\n", clients[activeconnections].name);
-                memset(tokens, 0, sizeof(tokens));
+                struct Client newClient;
+                newClient.sockfd = newsockfd;
+                newClient.authenticated = 0;
+                clients[activeconnections] = newClient;
+                activeconnections++;
             }
             else
             {
-                printf("Authentication failed\n");
+                // Đạt đến số lượng kết nối tối đa, từ chối kết nối mới
+                fprintf(stderr, "Too many connections. Connection rejected.\n");
+                close(newsockfd);
             }
-
-            activeconnections++;
-            // giải phóng semaphore sau khi đã thực hiện xong thao tác trên dữ liệu
-            sem_post(&sem);
         }
 
-        // xử lý dữ liệu từ các client kết nối
+        // kiểm tra các kết nối hiện tại nếu có dữ liệu đến
         for (int i = 0; i < activeconnections; i++)
         {
-            if (clients[i].sockfd != 0 && FD_ISSET(clients[i].sockfd, &readfds))
+            int sockfd = clients[i].sockfd;
+            if (FD_ISSET(sockfd, &readfds))
             {
-                // dợi semaphore trước khi thực hiện thao tác trên dữ liệu
-                sem_wait(&sem);
+                // đọc dữ liệu từ socket
+                int valread = read(sockfd, inBuffer, sizeof(inBuffer));
 
-                // xóa bộ đệm
-                memset(inBuffer, 0, 1024);
-                memset(outBuffer, 0, 1024);
-
-                // hàm read trả về 0 nếu kết nối đã đóng một cách bình thường
-                // và -1 nếu có lỗi
-                if (read(clients[i].sockfd, inBuffer, 1024) <= 0)
+                if (valread <= 0)
                 {
-                    fprintf(stderr, "Client %s disconnected\n", clients[i].name);
-                    close(clients[i].sockfd);
-                    clients[i].sockfd = 0;
+                    // Kết nối đã đóng hoặc xảy ra lỗi, xóa kết nối khỏi danh sách
+                    close(sockfd);
+                    clients[i] = clients[activeconnections - 1];
+                    activeconnections--;
+                    i--;
 
-                    // giải phóng semaphore sau khi đã thực hiện xong thao tác trên dữ liệu
-                    sem_post(&sem);
-
-                    continue;
+                    // Thông báo ngắt kết nối ra màn hình
+                    printf("Client %s disconnected\n", clients[i].name);
+                    notifyClientsAboutNewConnection(clients, activeconnections, clients[i].name, 0);
                 }
-
-                // Lấy thời gian hiện tại
-                char timeStr[20];
-                getCurrentTime(timeStr);
-
-                // In và log nội dung chat với thời gian
-                FILE *logFile = fopen("chatlog.txt", "a");
-                if (logFile != NULL)
+                else
                 {
-                    fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
-                    fclose(logFile);
-                }
-
-                fprintf(stdout, "%s: %s", clients[i].name, inBuffer);
-
-                // ghép tên client và dữ liệu nhận được để gửi đến các client khác
-                strcat(outBuffer, clients[i].name);
-                strcat(outBuffer, ": ");
-                strcat(outBuffer, inBuffer);
-
-                // gửi dữ liệu đến các client khác
-                for (int j = 0; j < activeconnections; j++)
-                {
-                    if (clients[j].sockfd != 0 && i != j)
+                    // Xử lý dữ liệu
+                    if (clients[i].authenticated == 0)
                     {
-                        write(clients[j].sockfd, outBuffer, strlen(outBuffer));
+                        // Chưa xác thực người dùng
+                        char username[50];
+                        char password[20];
+
+                        sscanf(inBuffer, "%s %s", username, password);
+                        printf("%s %s\n", username, password);
+
+                        if (authenticateUser(username, password, &clients[i]) == 1)
+                        {
+                            // Xác thực thành công
+                            clients[i].authenticated = 1;
+                            sendAuthenticationStatus(sockfd, 1);
+                            printf("User '%s' authenticated successfully.\n", clients[i].name);
+
+                            // Thông báo cho tất cả các client hiện tại về kết nối mới
+                            notifyClientsAboutNewConnection(clients, activeconnections, clients[i].name, 1);
+
+                        }
+                        else
+                        {
+                            // Xác thực thất bại
+                            clients[i].authenticated = 0;
+                            sendAuthenticationStatus(sockfd, 0);
+                            printf("User authentication failed.\n");
+                        }
+                    }
+                    else
+                    {
+                        // Người dùng đã xác thực, xử lý tin nhắn
+                        char timeStr[20];
+                        getCurrentTime(timeStr);
+
+                        // In và log nội dung chat với thời gian
+                        FILE *logFile = fopen("chatlog.txt", "a");
+                        if (logFile != NULL)
+                        {
+                            fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
+                            fclose(logFile);
+                        }
+
+                        printf("[%s] %s: %s\n", timeStr, clients[i].name, inBuffer);
+
+                        // Gửi tin nhắn đến các client khác
+                        for (int j = 0; j < activeconnections; j++)
+                        {
+                            int destSockfd = clients[j].sockfd;
+
+                            // Kiểm tra điều kiện để gửi tin nhắn đến các client khác
+                            if (destSockfd != sockfd && clients[j].authenticated == 1)
+                            {
+                                // Tạo chuỗi tin nhắn để gửi
+                                outBuffer[0] = '\0';
+                                strcat(outBuffer, "[");
+                                strcat(outBuffer, timeStr);
+                                strcat(outBuffer, "] ");
+                                strcat(outBuffer, clients[i].name);
+                                strcat(outBuffer, ": ");
+                                strcat(outBuffer, inBuffer);
+                                strcat(outBuffer, "\n");
+
+                                // Gửi tin nhắn đến client đích
+                                write(destSockfd, outBuffer, strlen(outBuffer));
+                            }
+                        }
                     }
                 }
 
-                // giải phóng semaphore sau khi đã thực hiện xong thao tác trên dữ liệu
-                sem_post(&sem);
+                memset(inBuffer, 0, sizeof(inBuffer));
             }
         }
     }
-
-    // hủy semaphore khi không cần sử dụng nữa
+    // giải phóng semaphore
     sem_destroy(&sem);
 
     return 0;

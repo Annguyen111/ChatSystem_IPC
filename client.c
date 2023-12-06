@@ -6,15 +6,9 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/select.h>
-#include <sys/types.h>
 #include <time.h>
+#include <termios.h>
 
-struct Credentials
-{
-    char name[50];
-    char password[20];
-};
-// Hàm để lấy thời gian hiện tại dưới dạng chuỗi
 void getCurrentTime(char *timeStr)
 {
     time_t rawtime;
@@ -26,15 +20,38 @@ void getCurrentTime(char *timeStr)
     strftime(timeStr, 20, "%Y-%m-%d %H:%M:%S", timeinfo);
 }
 
-// hàm này đọc dữ liệu từ stdin cho đến khi gặp ký tự eoc hoặc đạt đến giới hạn maxchars.
+void setTerminalEcho(int enable)
+{
+    struct termios tty;
+    tcgetattr(STDIN_FILENO, &tty);
+    if (!enable)
+    {
+        tty.c_lflag &= ~ECHO;
+    }
+    else
+    {
+        tty.c_lflag |= ECHO;
+    }
+    tcsetattr(STDIN_FILENO, TCSANOW, &tty);
+}
+
 int readline(char *buffer, int maxchars, char eoc)
 {
     int n = 0;
-    while (n < maxchars)
+    while (n < maxchars - 1)
     {
-        buffer[n] = getc(stdin);
-        if (buffer[n] == eoc)
+        int ch = getc(stdin);
+        if (ch == EOF)
+        {
+            perror("Error reading input");
+            exit(1);
+        }
+        buffer[n] = ch;
+        if (buffer[n] == eoc || buffer[n] == '\n')
+        {
+            buffer[n] = '\0';
             break;
+        }
         n++;
     }
     return n;
@@ -42,98 +59,137 @@ int readline(char *buffer, int maxchars, char eoc)
 
 int main(int argc, char const *argv[])
 {
+    char username[50];
+    char password[20];
+    int authenticationStatus = 0;
+
     int sockfd;
     struct sockaddr_in serv_addr;
+    char userData[1024];
     char sendline[1024], recvline[1024];
-    char loginData[100];
 
-    // tạo socket
+    memset(userData, 0, sizeof(userData));
+
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) <= 0)
     {
         perror("error while creating socket...");
         exit(1);
     }
 
-    // thiết lập địa chỉ của server
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(8080);
+
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
     {
         perror("address conversion error...");
         exit(-1);
     }
 
-    // kết nối đến server
+    printf("Welcome to our application\n");
+    printf("Let's login to chat\n");
+
+    fprintf(stdout, "Enter your name: ");
+    fflush(stdout);
+
+    if (readline(username, sizeof(username), '\n') <= 0)
+    {
+        perror("Error reading username");
+        exit(1);
+    }
+
+    fprintf(stdout, "Enter your password: ");
+    fflush(stdout);
+    setTerminalEcho(0); // Tắt hiển thị mật khẩu khi nhập
+    if (readline(password, sizeof(password), '\n') <= 0)
+    {
+        perror("Error reading password");
+        exit(1);
+    }
+
+    sprintf(userData, "%s %s\n", username, password);
+
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof serv_addr) < 0)
     {
         perror("connect error...");
         exit(1);
     }
-
-    // Login
-    struct Credentials credentials;
-
-    printf("Enter your name: ");
-    fgets(credentials.name, sizeof(credentials.name), stdin);
-    credentials.name[strcspn(credentials.name, "\n")] = '\0';
-
-    printf("Enter password: ");
-    fgets(credentials.password, sizeof(credentials.password), stdin);
-    credentials.password[strcspn(credentials.password, "\n")] = '\0';;
-
-    sprintf(loginData, "%s;%s", credentials.name, credentials.password);
-
-    // Send the login data to the server
-    ssize_t dataBytesWritten = send(sockfd, loginData, strlen(loginData), 0);
+    ssize_t dataBytesWritten = send(sockfd, userData, strlen(userData), 0);
 
     if (dataBytesWritten <= 0)
     {
         perror("send");
-        exit(1);
+        close(sockfd);
+        exit(EXIT_FAILURE);
     }
 
-    fd_set waitfds;
-    int readyfds;
-    while (1)
+    ssize_t bytesRead = read(sockfd, &authenticationStatus, sizeof(authenticationStatus));
+
+    if (bytesRead <= 0)
     {
-        FD_ZERO(&waitfds);
-
-        // thêm socket và stdin vào set waitfds
-        FD_SET(sockfd, &waitfds);
-        FD_SET(0, &waitfds);
-
-        // khởi tạo lại các buffer
-        memset(recvline, 0, 1024);
-        memset(sendline, 0, 1024);
-
-        // kiểm tra sự sẵn có của socket và stdin bằng hàm select
-        readyfds = select(sockfd + 1, &waitfds, NULL, NULL, NULL);
-        if ((readyfds < 0) && (errno != EINTR))
-        {
-            perror("select error");
-            exit(1);
-        }
-
-        // nếu stdin sẵn có, đọc dữ liệu và gửi đi
-        if (FD_ISSET(0, &waitfds))
-        {
-            readline(sendline, 1024, '\n');
-            write(sockfd, sendline, strlen(sendline));
-        }
-
-        // nếu socket sẵn có, đọc dữ liệu và in ra màn hình
-        if (FD_ISSET(sockfd, &waitfds))
-        {
-            read(sockfd, recvline, 1024);
-
-            // Lấy thời gian hiện tại
-            char timeStr[20];
-            getCurrentTime(timeStr);
-
-            // In thời gian và dòng tin nhắn ra màn hình
-            fprintf(stdout, "[%s] %s", timeStr, recvline);
-        }
+        perror("read");
+        close(sockfd);
+        exit(EXIT_FAILURE);
     }
 
+    if (authenticationStatus == 1)
+    {
+        fprintf(stdout, "\nAuthenticated successfully! Start chatting!\n");
+
+        fd_set waitfds;
+        int readyfds;
+        while (1)
+        {
+
+            FD_ZERO(&waitfds);
+
+            FD_SET(sockfd, &waitfds);
+            FD_SET(0, &waitfds);
+
+            memset(recvline, 0, sizeof(recvline));
+            memset(sendline, 0, sizeof(sendline));
+
+            readyfds = select(sockfd + 1, &waitfds, NULL, NULL, NULL);
+            if ((readyfds < 0) && (errno != EINTR))
+            {
+                perror("select error");
+                exit(1);
+            }
+            // Nếu có sẵn dữ liệu vào thì đọc và gửi đi
+            if (FD_ISSET(0, &waitfds))
+            {
+
+                if (fgets(sendline, sizeof(sendline), stdin) != NULL)
+                {
+                    sendline[strcspn(sendline, "\n")] = '\0';
+                    write(sockfd, sendline, strlen(sendline));
+
+                    // Kiểm tra nếu người dùng gõ "quit" thì thoát khỏi vòng lặp
+                    if (strcmp(sendline, "quit") == 0)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // Nếu có săn dữ liệu từ server gửi tới thì đọc và in ra màn hình
+            if (FD_ISSET(sockfd, &waitfds))
+            {
+                ssize_t bytesRead = read(sockfd, recvline, sizeof(recvline));
+                if (bytesRead <= 0)
+                {
+                    perror("read");
+                    close(sockfd);
+                    exit(EXIT_FAILURE);
+                }
+                printf("%s\n", recvline);
+            }
+        }
+    }
+    else
+    {
+        fprintf(stdout, "Authentication failed. Invalid username or password.\n");
+    }
+
+    close(sockfd);
     return 0;
 }
