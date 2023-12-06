@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <semaphore.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #define MAX_CLIENTS 10
 
@@ -37,19 +38,25 @@ void sendAuthenticationStatus(int sockfd, int status)
     write(sockfd, &status, sizeof(status));
 }
 
-void notifyClientsAboutNewConnection(struct Client clients[], int activeconnections, const char* clientName, int state)
+void notifyClientsAboutNewConnection(struct Client clients[], int activeconnections, const char *clientName, int state)
 {
     char notification[100];
-    if (state == 1) {
+    if (state == 1)
+    {
         sprintf(notification, "Client %s joined\n", clientName);
-    } else {
+    }
+    else
+    {
         sprintf(notification, "Client %s logouted\n", clientName);
     }
-    
+
     for (int i = 0; i < activeconnections; i++)
     {
         int clientSockfd = clients[i].sockfd;
-        write(clientSockfd, notification, strlen(notification));
+        if (clientSockfd > 0)
+        {
+            write(clientSockfd, notification, strlen(notification));
+        }
     }
 }
 
@@ -79,6 +86,55 @@ int authenticateUser(const char *username, const char *password, struct Client *
 
     fclose(dbFile);
     return 0; // Authentication failed
+}
+
+// Hàm này dùng để nhận file từ client
+void receiveFile(int sockfd, const char *fileName, struct Client clients[], int activeconnections)
+{
+    sem_wait(&sem);
+
+    // Kiểm tra và tạo thư mục nếu nó chưa tồn tại
+    struct stat st;
+    stat("/path/to/directory", &st);
+    if (!(st.st_mode & S_IWUSR))
+    {
+        perror("No write permission for directory");
+        sem_post(&sem);
+        return;
+    }
+
+    FILE *file = fopen(fileName, "ab");
+    if (file == NULL)
+    {
+        perror("Error opening file for writing");
+        sem_post(&sem);
+        return;
+    }
+
+    // Kiểm tra lỗi ghi vào file
+    if (ferror(file))
+    {
+        perror("Error writing to file");
+        sem_post(&sem);
+        fclose(file);
+        return;
+    }
+
+    fclose(file);
+
+    // Thông báo cho tất cả các client khác về việc gửi file thành công
+    char notification[100];
+    sprintf(notification, "Client sent a file: %s\n", fileName);
+    for (int i = 0; i < activeconnections; i++)
+    {
+        int destSockfd = clients[i].sockfd;
+        if (destSockfd != sockfd)
+        {
+            write(destSockfd, notification, strlen(notification));
+        }
+    }
+
+    sem_post(&sem);
 }
 
 int main(int argc, char const *argv[])
@@ -175,6 +231,7 @@ int main(int argc, char const *argv[])
             }
 
             // thêm kết nối mới vào danh sách kết nối
+            sem_wait(&sem);
             if (activeconnections < MAX_CLIENTS)
             {
                 struct Client newClient;
@@ -189,6 +246,7 @@ int main(int argc, char const *argv[])
                 fprintf(stderr, "Too many connections. Connection rejected.\n");
                 close(newsockfd);
             }
+            sem_post(&sem);
         }
 
         // kiểm tra các kết nối hiện tại nếu có dữ liệu đến
@@ -204,13 +262,15 @@ int main(int argc, char const *argv[])
                 {
                     // Kết nối đã đóng hoặc xảy ra lỗi, xóa kết nối khỏi danh sách
                     close(sockfd);
-                    clients[i] = clients[activeconnections - 1];
-                    activeconnections--;
-                    i--;
-
                     // Thông báo ngắt kết nối ra màn hình
                     printf("Client %s disconnected\n", clients[i].name);
                     notifyClientsAboutNewConnection(clients, activeconnections, clients[i].name, 0);
+
+                    sem_wait(&sem);
+                    clients[i] = clients[activeconnections - 1];
+                    activeconnections--;
+                    sem_post(&sem);
+                    i--;
                 }
                 else
                 {
@@ -233,7 +293,6 @@ int main(int argc, char const *argv[])
 
                             // Thông báo cho tất cả các client hiện tại về kết nối mới
                             notifyClientsAboutNewConnection(clients, activeconnections, clients[i].name, 1);
-
                         }
                         else
                         {
@@ -245,41 +304,60 @@ int main(int argc, char const *argv[])
                     }
                     else
                     {
-                        // Người dùng đã xác thực, xử lý tin nhắn
-                        char timeStr[20];
-                        getCurrentTime(timeStr);
-
-                        // In và log nội dung chat với thời gian
-                        FILE *logFile = fopen("chatlog.txt", "a");
-                        if (logFile != NULL)
+                        // Nếu dữ liệu là lệnh "sendfile" thì nhận file từ client
+                        if (strcmp(inBuffer, "sendfile") == 0)
                         {
-                            fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
-                            fclose(logFile);
+                            fprintf(stdout, "Receiving a file...\n");
+
+                            // Nhận tên file từ client
+                            char fileName[256];
+                            read(sockfd, fileName, sizeof(fileName));
+
+                            // Gọi hàm nhận file
+                            receiveFile(sockfd, fileName, clients, activeconnections);
+
+                            fprintf(stdout, "File received successfully!\n");
                         }
-
-                        printf("[%s] %s: %s\n", timeStr, clients[i].name, inBuffer);
-
-                        // Gửi tin nhắn đến các client khác
-                        for (int j = 0; j < activeconnections; j++)
+                        else
                         {
-                            int destSockfd = clients[j].sockfd;
+                            // Người dùng đã xác thực, xử lý tin nhắn
+                            char timeStr[20];
+                            getCurrentTime(timeStr);
 
-                            // Kiểm tra điều kiện để gửi tin nhắn đến các client khác
-                            if (destSockfd != sockfd && clients[j].authenticated == 1)
+                            // In và log nội dung chat với thời gian
+                            FILE *logFile = fopen("chatlog.txt", "a");
+                            if (logFile != NULL)
                             {
-                                // Tạo chuỗi tin nhắn để gửi
-                                outBuffer[0] = '\0';
-                                strcat(outBuffer, "[");
-                                strcat(outBuffer, timeStr);
-                                strcat(outBuffer, "] ");
-                                strcat(outBuffer, clients[i].name);
-                                strcat(outBuffer, ": ");
-                                strcat(outBuffer, inBuffer);
-                                strcat(outBuffer, "\n");
-
-                                // Gửi tin nhắn đến client đích
-                                write(destSockfd, outBuffer, strlen(outBuffer));
+                                fprintf(logFile, "[%s] %s: %s", timeStr, clients[i].name, inBuffer);
+                                fclose(logFile);
                             }
+
+                            printf("[%s] %s: %s\n", timeStr, clients[i].name, inBuffer);
+
+                            // Gửi tin nhắn đến các client khác
+                            sem_wait(&sem);
+                            for (int j = 0; j < activeconnections; j++)
+                            {
+                                int destSockfd = clients[j].sockfd;
+
+                                // Kiểm tra điều kiện để gửi tin nhắn đến các client khác
+                                if (destSockfd != sockfd && clients[j].authenticated == 1)
+                                {
+                                    // Tạo chuỗi tin nhắn để gửi
+                                    outBuffer[0] = '\0';
+                                    strcat(outBuffer, "[");
+                                    strcat(outBuffer, timeStr);
+                                    strcat(outBuffer, "] ");
+                                    strcat(outBuffer, clients[i].name);
+                                    strcat(outBuffer, ": ");
+                                    strcat(outBuffer, inBuffer);
+                                    strcat(outBuffer, "\n");
+
+                                    // Gửi tin nhắn đến client đích
+                                    write(destSockfd, outBuffer, strlen(outBuffer));
+                                }
+                            }
+                            sem_post(&sem);
                         }
                     }
                 }

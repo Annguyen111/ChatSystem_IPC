@@ -8,6 +8,7 @@
 #include <sys/select.h>
 #include <time.h>
 #include <termios.h>
+#include <pthread.h>
 
 void getCurrentTime(char *timeStr)
 {
@@ -55,6 +56,67 @@ int readline(char *buffer, int maxchars, char eoc)
         n++;
     }
     return n;
+}
+
+// Hàm xử lý luồng cho việc gửi file
+void *sendFileThreadFunction(void *arg)
+{
+    int sockfd = *((int *)arg);
+
+    // Nhập đường dẫn của file từ người dùng
+    fprintf(stdout, "Enter the path of the file to send: ");
+    fflush(stdout);
+
+    char filePath[256];
+    if (readline(filePath, sizeof(filePath), '\n') <= 0)
+    {
+        perror("Error reading file path");
+        exit(1);
+    }
+
+    // Kiểm tra xem file có tồn tại không
+    if (access(filePath, F_OK) == -1)
+    {
+        fprintf(stdout, "File not found: %s\n", filePath);
+        pthread_exit(NULL); // Kết thúc luồng nếu file không tồn tại
+    }
+
+    // Gửi lệnh "sendfile" đến server
+    write(sockfd, "sendfile", strlen("sendfile"));
+
+    // Gửi tên file đến server
+    write(sockfd, filePath, strlen(filePath));
+
+    // Mở file để đọc và gửi dữ liệu
+    FILE *file = fopen(filePath, "rb");
+    if (file == NULL)
+    {
+        perror("Error opening file for reading");
+        exit(1);
+    }
+
+    char buffer[1024];
+    size_t bytesRead;
+
+    // Đọc từ file và gửi đến server
+    while ((bytesRead = fread(buffer, 1, sizeof(buffer), file)) > 0)
+    {
+        ssize_t bytesSent = write(sockfd, buffer, bytesRead);
+        if (bytesSent <= 0)
+        {
+            perror("Error sending file data");
+            fclose(file);
+            pthread_exit(NULL);
+        }
+    }
+
+    // Gửi lệnh "EOF" để thông báo là đã gửi xong file
+    write(sockfd, "EOF", strlen("EOF"));
+
+    fclose(file);
+
+    // Kết thúc luồng
+    pthread_exit(NULL);
 }
 
 int main(int argc, char const *argv[])
@@ -105,6 +167,8 @@ int main(int argc, char const *argv[])
         perror("Error reading password");
         exit(1);
     }
+    // Kích hoạt lại hiển thị mật khẩu
+    setTerminalEcho(1);
 
     sprintf(userData, "%s %s\n", username, password);
 
@@ -137,51 +201,90 @@ int main(int argc, char const *argv[])
 
         fd_set waitfds;
         int readyfds;
+        struct timeval timeout;
+
         while (1)
         {
-
             FD_ZERO(&waitfds);
-
             FD_SET(sockfd, &waitfds);
             FD_SET(0, &waitfds);
+
+            // Thiết lập thời gian chờ là 1 giây
+            timeout.tv_sec = 30;
+            timeout.tv_usec = 0;
 
             memset(recvline, 0, sizeof(recvline));
             memset(sendline, 0, sizeof(sendline));
 
-            readyfds = select(sockfd + 1, &waitfds, NULL, NULL, NULL);
-            if ((readyfds < 0) && (errno != EINTR))
+            readyfds = select(sockfd + 1, &waitfds, NULL, NULL, &timeout);
+            if (readyfds < 0)
             {
                 perror("select error");
                 exit(1);
             }
-            // Nếu có sẵn dữ liệu vào thì đọc và gửi đi
-            if (FD_ISSET(0, &waitfds))
+            else if (readyfds == 0)
             {
-
-                if (fgets(sendline, sizeof(sendline), stdin) != NULL)
+                // Không có sự kiện nào xảy ra trong thời gian chờ
+                printf("Waiting for input...\n");
+            }
+            else
+            {
+                // Nếu có sẵn dữ liệu vào thì đọc và gửi đi
+                if (FD_ISSET(0, &waitfds))
                 {
-                    sendline[strcspn(sendline, "\n")] = '\0';
-                    write(sockfd, sendline, strlen(sendline));
-
-                    // Kiểm tra nếu người dùng gõ "quit" thì thoát khỏi vòng lặp
-                    if (strcmp(sendline, "quit") == 0)
+                    if (fgets(sendline, sizeof(sendline), stdin) != NULL)
                     {
-                        break;
+                        sendline[strcspn(sendline, "\n")] = '\0';
+                        // Kiểm tra nếu lệnh là "sendfile" thì thực hiện gửi file
+                        if (strcmp(sendline, "sendfile") == 0)
+                        {
+                            // Tạo một luồng mới để xử lý việc gửi file
+                            pthread_t sendFileThread;
+                            if (pthread_create(&sendFileThread, NULL, sendFileThreadFunction, (void *)&sockfd) != 0)
+                            {
+                                perror("pthread_create error");
+                                exit(EXIT_FAILURE);
+                            }
+
+                            // Đợi luồng gửi file kết thúc
+                            pthread_join(sendFileThread, NULL);
+                        }
+                        else
+                        {
+                            // Gửi thông điệp như thông thường
+                            write(sockfd, sendline, strlen(sendline));
+
+                            // Kiểm tra nếu người dùng gõ "quit" thì thoát khỏi vòng lặp
+                            if (strcmp(sendline, "quit") == 0)
+                            {
+                                break;
+                            }
+                        }
                     }
                 }
-            }
 
-            // Nếu có săn dữ liệu từ server gửi tới thì đọc và in ra màn hình
-            if (FD_ISSET(sockfd, &waitfds))
-            {
-                ssize_t bytesRead = read(sockfd, recvline, sizeof(recvline));
-                if (bytesRead <= 0)
+                // Nếu có sẵn dữ liệu từ server gửi tới thì đọc và in ra màn hình
+                if (FD_ISSET(sockfd, &waitfds))
                 {
-                    perror("read");
-                    close(sockfd);
-                    exit(EXIT_FAILURE);
+                    // Xử lý dữ liệu từ server
+                    ssize_t bytesRead = read(sockfd, recvline, sizeof(recvline));
+                    if (bytesRead <= 0)
+                    {
+                        if (bytesRead == 0)
+                        {
+                            // Server đã đóng kết nối
+                            printf("Server has stopped.\n");
+                        }
+                        else
+                        {
+                            perror("read");
+                        }
+
+                        close(sockfd);
+                        exit(EXIT_FAILURE);
+                    }
+                    printf("%s\n", recvline);
                 }
-                printf("%s\n", recvline);
             }
         }
     }
