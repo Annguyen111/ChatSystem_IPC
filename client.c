@@ -249,6 +249,20 @@ int main(int argc, char const *argv[])
                             // Đợi luồng gửi file kết thúc
                             pthread_join(sendFileThread, NULL);
                         }
+                        else if (strncmp(sendline, "private", 7) == 0)
+                        {
+                            // Xử lý yêu cầu chat riêng
+                            char privateUsername[50];
+                            sscanf(sendline, "private %s", privateUsername);
+                            write(sockfd, sendline, strlen(sendline));
+                        }
+                        else if (strncmp(sendline, "endprivate", 10) == 0)
+                        {
+                            // Xử lý yêu cầu chat riêng
+                            char privateUsername[50];
+                            sscanf(sendline, "endprivate %s", privateUsername);
+                            write(sockfd, sendline, strlen(sendline));
+                        }
                         else
                         {
                             // Gửi thông điệp như thông thường
@@ -283,6 +297,7 @@ int main(int argc, char const *argv[])
                         close(sockfd);
                         exit(EXIT_FAILURE);
                     }
+                    
                     printf("%s\n", recvline);
                 }
             }

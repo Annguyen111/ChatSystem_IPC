@@ -20,6 +20,7 @@ struct Client
     char name[50];
     char password[20];
     int authenticated;
+    char privateChatWith[50];
 };
 
 void getCurrentTime(char *timeStr)
@@ -89,13 +90,13 @@ int authenticateUser(const char *username, const char *password, struct Client *
 }
 
 // Hàm này dùng để nhận file từ client
-void receiveFile(int sockfd, const char *fileName, struct Client clients[], int activeconnections)
+void receiveFile(int sockfd, const char *fileName, struct Client clients[], struct Client rootClient , int activeconnections)
 {
     sem_wait(&sem);
 
     // Kiểm tra và tạo thư mục nếu nó chưa tồn tại
     struct stat st;
-    stat("/path/to/directory", &st);
+    stat("uploads/", &st);
     if (!(st.st_mode & S_IWUSR))
     {
         perror("No write permission for directory");
@@ -124,7 +125,7 @@ void receiveFile(int sockfd, const char *fileName, struct Client clients[], int 
 
     // Thông báo cho tất cả các client khác về việc gửi file thành công
     char notification[100];
-    sprintf(notification, "Client sent a file: %s\n", fileName);
+    sprintf(notification, "Client %s sent a file: %s\n", rootClient.name, fileName);
     for (int i = 0; i < activeconnections; i++)
     {
         int destSockfd = clients[i].sockfd;
@@ -140,6 +141,7 @@ void receiveFile(int sockfd, const char *fileName, struct Client clients[], int 
 int main(int argc, char const *argv[])
 {
     int mastersockfd, activeconnections = 0;
+    int privateChat = 0;
     struct Client clients[MAX_CLIENTS];
 
     struct sockaddr_in serv_addr, clientIP;
@@ -237,6 +239,7 @@ int main(int argc, char const *argv[])
                 struct Client newClient;
                 newClient.sockfd = newsockfd;
                 newClient.authenticated = 0;
+                newClient.privateChatWith[0] = '\0';
                 clients[activeconnections] = newClient;
                 activeconnections++;
             }
@@ -282,7 +285,7 @@ int main(int argc, char const *argv[])
                         char password[20];
 
                         sscanf(inBuffer, "%s %s", username, password);
-                        printf("%s %s\n", username, password);
+                        // printf("%s %s\n", username, password);
 
                         if (authenticateUser(username, password, &clients[i]) == 1)
                         {
@@ -305,18 +308,99 @@ int main(int argc, char const *argv[])
                     else
                     {
                         // Nếu dữ liệu là lệnh "sendfile" thì nhận file từ client
-                        if (strcmp(inBuffer, "sendfile") == 0)
+                        if (strncmp(inBuffer, "sendfile", 8) == 0)
                         {
                             fprintf(stdout, "Receiving a file...\n");
 
                             // Nhận tên file từ client
                             char fileName[256];
-                            read(sockfd, fileName, sizeof(fileName));
+                            sscanf(inBuffer, "sendfile %s", fileName);
+                            // read(sockfd, fileName, sizeof(fileName));
 
                             // Gọi hàm nhận file
-                            receiveFile(sockfd, fileName, clients, activeconnections);
+                            receiveFile(sockfd, fileName, clients, clients[i], activeconnections);
 
                             fprintf(stdout, "File received successfully!\n");
+                        }
+                        else if (strncmp(inBuffer, "private", 7) == 0)
+                        {
+                            privateChat = 1;
+                            char targetUser[50];
+                            sscanf(inBuffer, "private %s", targetUser);
+
+                            // Gửi yêu cầu chat riêng đến người dùng có tên là targetUser
+                            int targetIndex = -1;
+                            for (int j = 0; j < activeconnections; j++)
+                            {
+                                if (strcmp(clients[j].name, targetUser) == 0)
+                                {
+                                    targetIndex = j;
+                                    break;
+                                }
+                            }
+
+                            // Nếu tìm thấy người dùng, thiết lập cuộc trò chuyện riêng
+                            if (targetIndex != -1 && clients[targetIndex].authenticated == 1)
+                            {
+                                strcpy(clients[i].privateChatWith, targetUser);
+                                strcpy(clients[targetIndex].privateChatWith, clients[i].name);
+
+                                printf("%s and %s are staying in private chat.\n", clients[i].name, clients[targetIndex].name);
+                                // Gửi thông báo cho cả hai người dùng
+                                char notification[100];
+                                sprintf(notification, "You are now in a private chat with %s\n", targetUser);
+                                write(sockfd, notification, strlen(notification));
+
+                                sprintf(notification, "You are now in a private chat with %s\n", clients[i].name);
+                                write(clients[targetIndex].sockfd, notification, strlen(notification));
+                            }
+                            else
+                            {
+                                // Không tìm thấy người dùng
+                                char notification[100];
+                                sprintf(notification, "User %s not found or not online\n", targetUser);
+                                write(sockfd, notification, strlen(notification));
+                            }
+                        }
+                        else if ((strncmp(inBuffer, "endprivate", 7) == 0))
+                        {
+                            privateChat = 0;
+                            char targetUser[50];
+                            sscanf(inBuffer, "endprivate %s", targetUser);
+
+                            // Gửi yêu cầu chat riêng đến người dùng có tên là targetUser
+                            int targetIndex = -1;
+                            for (int j = 0; j < activeconnections; j++)
+                            {
+                                if (strcmp(clients[j].name, targetUser) == 0)
+                                {
+                                    targetIndex = j;
+                                    break;
+                                }
+                            }
+
+                            // Nếu tìm thấy người dùng, thiết lập cuộc trò chuyện riêng
+                            if (targetIndex != -1 && clients[targetIndex].authenticated == 1)
+                            {
+                                clients[i].privateChatWith[0] = '\0';
+                                clients[targetIndex].privateChatWith[0] = '\0';
+
+                                printf("%s and %s quited in private chat.\n", clients[i].name, clients[targetIndex].name);
+                                // Gửi thông báo cho cả hai người dùng
+                                char notification[100];
+                                sprintf(notification, "You quited in a private chat with %s\n", targetUser);
+                                write(sockfd, notification, strlen(notification));
+
+                                sprintf(notification, "You quited in a private chat with %s\n", clients[i].name);
+                                write(clients[targetIndex].sockfd, notification, strlen(notification));
+                            }
+                            else
+                            {
+                                // Không tìm thấy người dùng
+                                char notification[100];
+                                sprintf(notification, "User %s not found or not online\n", targetUser);
+                                write(sockfd, notification, strlen(notification));
+                            }
                         }
                         else
                         {
@@ -343,18 +427,42 @@ int main(int argc, char const *argv[])
                                 // Kiểm tra điều kiện để gửi tin nhắn đến các client khác
                                 if (destSockfd != sockfd && clients[j].authenticated == 1)
                                 {
-                                    // Tạo chuỗi tin nhắn để gửi
-                                    outBuffer[0] = '\0';
-                                    strcat(outBuffer, "[");
-                                    strcat(outBuffer, timeStr);
-                                    strcat(outBuffer, "] ");
-                                    strcat(outBuffer, clients[i].name);
-                                    strcat(outBuffer, ": ");
-                                    strcat(outBuffer, inBuffer);
-                                    strcat(outBuffer, "\n");
+                                    printf("Data privateChatWith: %s\n", clients[j].privateChatWith);
+                                    // Kiểm tra xem tin nhắn có phải là tin nhắn riêng không
+                                    if ((strcmp(clients[j].name, clients[i].privateChatWith) == 0 || strcmp(clients[i].name, clients[j].privateChatWith) == 0) &&
+                                        clients[j].privateChatWith[0] != '\0')
+                                    {
 
-                                    // Gửi tin nhắn đến client đích
-                                    write(destSockfd, outBuffer, strlen(outBuffer));
+                                        // Tạo chuỗi tin nhắn để gửi
+                                        outBuffer[0] = '\0';
+                                        strcat(outBuffer, "[Private] ");
+                                        strcat(outBuffer, clients[i].name);
+                                        strcat(outBuffer, ": ");
+                                        strcat(outBuffer, inBuffer);
+                                        strcat(outBuffer, "\n");
+
+                                        // Gửi tin nhắn đến client đích
+                                        write(destSockfd, outBuffer, strlen(outBuffer));
+                                    }
+                                    else if (clients[j].privateChatWith[0] == '\0')
+                                    {
+                                        if (privateChat == 0)
+                                        {
+                                            // Tin nhắn không phải là riêng, và client không đang trong cuộc trò chuyện riêng
+                                            // Tạo chuỗi tin nhắn để gửi
+                                            outBuffer[0] = '\0';
+                                            strcat(outBuffer, "[");
+                                            strcat(outBuffer, timeStr);
+                                            strcat(outBuffer, "] ");
+                                            strcat(outBuffer, clients[i].name);
+                                            strcat(outBuffer, ": ");
+                                            strcat(outBuffer, inBuffer);
+                                            strcat(outBuffer, "\n");
+
+                                            // Gửi tin nhắn đến client đích
+                                            write(destSockfd, outBuffer, strlen(outBuffer));
+                                        }
+                                    }
                                 }
                             }
                             sem_post(&sem);
