@@ -149,6 +149,10 @@ int main(int argc, char const *argv[])
 
     printf("Welcome to our application\n");
     printf("Let's login to chat\n");
+    printf("Note: Typing 'sendfile' to send file\n");
+    printf("      Typing 'private <username>' to chat 1 - 1");
+    printf("      Typing 'endprivate <username>' to end chatting private");
+    printf("      Typing 'quit' to logout");
 
     fprintf(stdout, "Enter your name: ");
     fflush(stdout);
