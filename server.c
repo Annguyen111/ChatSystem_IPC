@@ -90,7 +90,7 @@ int authenticateUser(const char *username, const char *password, struct Client *
 }
 
 // Hàm này dùng để nhận file từ client
-void receiveFile(int sockfd, const char *fileName, struct Client clients[], struct Client rootClient , int activeconnections)
+void receiveFile(int sockfd,const char *fileName, struct Client clients[], struct Client rootClient, int activeconnections)
 {
     sem_wait(&sem);
 
@@ -104,7 +104,9 @@ void receiveFile(int sockfd, const char *fileName, struct Client clients[], stru
         return;
     }
 
-    FILE *file = fopen(fileName, "ab");
+    char filePath[256];  // Khai báo filePath ở đây
+    sprintf(filePath, "uploads/%s", fileName);
+    FILE *file = fopen(filePath, "wb");
     if (file == NULL)
     {
         perror("Error opening file for writing");
@@ -112,20 +114,68 @@ void receiveFile(int sockfd, const char *fileName, struct Client clients[], stru
         return;
     }
 
-    // Kiểm tra lỗi ghi vào file
-    if (ferror(file))
+    char buffer[1024];
+    size_t bytesRead;
+
+    // Đọc tên file từ socket
+    bytesRead = read(sockfd, filePath, sizeof(filePath));
+    if (bytesRead <= 0)
     {
-        perror("Error writing to file");
+        perror("Error reading file path");
         sem_post(&sem);
         fclose(file);
         return;
     }
 
+    // Nếu có kí tự kết thúc chuỗi, loại bỏ nó
+    if (filePath[bytesRead - 1] == '\0')
+    {
+        filePath[bytesRead - 1] = '\0';
+    }
+    else
+    {
+        fprintf(stderr, "Warning: File path may not be null-terminated.\n");
+    }
+
+    // Kiểm tra xem file có tồn tại không
+    if (access(filePath, F_OK) == -1)
+    {
+        fprintf(stdout, "File not found: %s\n", filePath);
+        sem_post(&sem);
+        fclose(file);
+        return;
+    }
+
+    // Đọc từ socket và ghi vào file
+    while ((bytesRead = read(sockfd, buffer, sizeof(buffer))) > 0)
+    {
+        if (strncmp(buffer, "EOF", strlen("EOF")) == 0)
+        {
+            break;
+        }
+
+        size_t bytesWritten = fwrite(buffer, 1, bytesRead, file);
+        if (bytesWritten != bytesRead)
+        {
+            perror("Error writing to file");
+            sem_post(&sem);
+            fclose(file);
+            return;
+        }
+    }
+
+    // Kiểm tra lỗi đọc từ socket
+    if (bytesRead < 0)
+    {
+        perror("Error reading from socket");
+        sem_post(&sem);
+        fclose(file);
+        return;
+    }
     fclose(file);
 
     // Thông báo cho tất cả các client khác về việc gửi file thành công
     char notification[100];
-    sprintf(notification, "Client %s sent a file: %s\n", rootClient.name, fileName);
     for (int i = 0; i < activeconnections; i++)
     {
         int destSockfd = clients[i].sockfd;

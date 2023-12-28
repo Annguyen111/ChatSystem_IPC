@@ -138,4 +138,7 @@ quang 1234EOF[2023-12-10 15:28:49] quang: sendfiledatabase.txtjunjun 123456
 an 12345
 quang 1234EOF[2023-12-10 15:34:00] an: hello[2023-12-10 15:34:09] quang: helo[2023-12-10 15:34:24] quang: junjun 123456
 an 12345
-quang 1234EOF[2023-12-10 15:42:26] an: hello[2023-12-10 15:42:35] quang: helo
+quang 1234EOF[2023-12-10 15:42:26] an: hello[2023-12-10 15:42:35] quang: helo[2023-12-27 18:36:33] junjun: a[2023-12-27 18:36:47] junjun: cdb helo my friend
+EOF[2023-12-27 18:38:53] junjun: o[2023-12-27 18:39:13] an: /home/xuanquoc1/demolala
+EOF[2023-12-27 18:46:01] junjun: a[2023-12-27 18:46:13] junjun: EOF[2023-12-27 18:50:52] junjun: a[2023-12-27 18:51:01] junjun: lala
+EOF[2023-12-27 18:54:07] junjun: alo[2023-12-27 18:56:01] junjun: alo[2023-12-27 18:56:03] junjun: hhi[2023-12-27 19:04:25] junjun: alo[2023-12-27 19:04:29] an: hi[2023-12-27 19:11:14] an: aaa[2023-12-27 19:12:38] junjun: a[2023-12-27 19:28:15] junjun: s[2023-12-27 19:28:25] junjun: EOF[2023-12-27 19:33:51] junjun: al[2023-12-27 19:37:22] an: /home/xuanquoc1/demo[2023-12-27 19:39:27] an: /home/xuanquoc1/demoEOF[2023-12-27 20:31:46] an: ala

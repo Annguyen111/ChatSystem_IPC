@@ -81,11 +81,20 @@ void *sendFileThreadFunction(void *arg)
         pthread_exit(NULL); // Kết thúc luồng nếu file không tồn tại
     }
 
+    char *fileName = strrchr(filePath, '/');
+    if (fileName != NULL)
+    {
+        fileName++; // Bỏ qua dấu "/"
+    }
+    else
+    {
+        fileName = filePath; // Nếu không có "/", fileName là toàn bộ đường dẫn
+    }
     // Gửi lệnh "sendfile" đến server
     write(sockfd, "sendfile", strlen("sendfile"));
 
     // Gửi tên file đến server
-    write(sockfd, filePath, strlen(filePath));
+    write(sockfd, fileName, strlen(fileName));
 
     // Mở file để đọc và gửi dữ liệu
     FILE *file = fopen(filePath, "rb");
